@@ -59,8 +59,8 @@ Najlepsze wyniki osiągnął model **regresji logistycznej**, uzyskując:
 
 
 ## ✍️ Autor
-Zuzanna Winiarska
-Data: czerwiec 2025
+- **Zuzanna Winiarska**
+- **Data**: czerwiec 2025
 
 ## 📄 Licencja
 Projekt przeznaczony wyłącznie do celów edukacyjnych. Nie służy do podejmowania decyzji klinicznych.
