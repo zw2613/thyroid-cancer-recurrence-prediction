@@ -20,10 +20,9 @@ Zbiór danych zawiera informacje medyczne dotyczące pacjentów po leczeniu raka
 - Wiek
 - Płeć
 - Stopień zaawansowania guza
-- Obecność przerzutów do węzłów chłonnych
-- Typ histologiczny
-- Rodzaj leczenia
-- Czas do nawrotu (jeśli wystąpił)
+- Historia radioterapii
+- Rodzaj patologii
+- Zaawansowanie węzłów chłonnych
 
 ## ⚙️ Zastosowane modele
 
@@ -31,7 +30,8 @@ Zbiór danych zawiera informacje medyczne dotyczące pacjentów po leczeniu raka
 - Drzewo decyzyjne
 - Random Forest
 - Maszyna wektorów nośnych (SVM)
-- Sieć neuronowa (MLP)
+- k-NN
+- XGBoost
 
 Ocena modeli obejmuje:
 - Accuracy (dokładność)
