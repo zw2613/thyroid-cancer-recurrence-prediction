@@ -1,0 +1,1103 @@
+---
+title: "Predykcja nawrotu raka tarczycy z wykorzystaniem danych medycznych"
+author: "Zuzanna Winiarska"
+date: "2025-05-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+```{r include=FALSE}
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(xgboost)
+library(pROC)
+library(ROCR)
+library(DataExplorer)
+library(rsample)
+library(corrplot)
+library(caret)
+library(ggfortify)
+library(rpart)
+library(randomForest)
+library(recipes)
+library(tidymodels)
+library(dplyr)
+library(themis)
+library(fastDummies)
+library(yardstick)
+library(ggplot2)
+library(patchwork)
+library(tidyr)
+```
+
+## ![](images/dataset-cover.png)
+
+## 1. Definicja problemu predykcyjnego oraz szczegółowa charakterystyka zbioru danych
+
+### 1.1 Opis problemu
+
+Celem analizy jest zbudowanie modelu predykcyjnego pozwalającego na przewidywanie nawrotu raka tarczycy na podstawie dostępnych danych klinicznych i patologicznych pacjentów. Problem ma charakter klasyfikacji binarnej, gdzie zmienna docelowa `Recurred` informuje o wystąpieniu nawrotu choroby (`Yes`) lub jego braku (`No`). Precyzyjne prognozowanie nawrotów jest istotne klinicznie, gdyż umożliwia lepsze zarządzanie leczeniem i monitoringiem pacjentów, poprawiając tym samym ich rokowanie i jakość życia.
+
+### 1.2 Charakterystyka zbioru danych:
+
+```{r}
+# Wczytanie danych
+data <- read.csv("filtered_thyroid_data.csv", stringsAsFactors = TRUE)
+```
+
+Zbiór danych zawiera 383 obserwacje opisane 13 zmiennymi, które możemy podzielić na następujące grupy:
+
+| Zmienna | Typ zmiennej | Opis |
+|-------------------|-------------------|----------------------------------|
+| **Age** | Ilościowa (int) | Wiek pacjenta, od 15 do 82 lat (średnia: 40.87, mediana: 37) |
+| **Gender** | Kategoryczna | Płeć pacjenta (`F` - 312 kobiet, `M` - 71 mężczyzn) |
+| **Hx.Radiotherapy** | Kategoryczna | Historia radioterapii (`No` - 376, `Yes` - 7) |
+| **Adenopathy** | Kategoryczna | Zaawansowanie węzłów chłonnych (np. `Bilateral`, `Extensive`, `No`) |
+| **Pathology** | Kategoryczna | Typ patologii (np. `Follicular`, `Hurthel cell`, `Micropapillary`, `Papillary`) |
+| **Focality** | Kategoryczna | Ogniskowość zmian (`Multi-Focal` 136, `Uni-Focal` 247) |
+| **Risk** | Kategoryczna | Ocena ryzyka (`High` 32, `Intermediate` 102, `Low` 249) |
+| **T** | Kategoryczna | Klasyfikacja TNM guza (od `T1a` do `T4b`) |
+| **N** | Kategoryczna | Klasyfikacja węzłów chłonnych (`N0`, `N1a`, `N1b`) |
+| **M** | Kategoryczna | Klasyfikacja przerzutów (`M0`, `M1`) |
+| **Stage** | Kategoryczna | Etap zaawansowania (`I`, `II`, `III`, `IVA`, `IVB`) |
+| **Response** | Kategoryczna | Odpowiedź na leczenie (m.in. `Excellent`, `Indeterminate`, `Structural Incomplete`) |
+| **Recurred** | Kategoryczna | Zmienna docelowa — nawrot choroby (`No` 275, `Yes` 108) |
+
+## 2. Czyszczenie danych oraz wstępna selekcja cech
+
+Celem tego etapu jest przygotowanie zbioru danych do dalszej analizy i modelowania. Obejmuje on usunięcie duplikatów, sprawdzenie braków danych, ustawienie odpowiednich typów zmiennych, analizę rozkładu zmiennych, wykrycie i obsługę wartości odstających oraz wstępną selekcję cech.
+
+### 2.1 Identyfikacja duplikatów
+
+Na początku sprawdzono, czy w zbiorze danych występują duplikaty – wiersze identyczne we wszystkich kolumnach.
+
+```{r}
+# Sprawdzenie liczby duplikatów
+sum(duplicated(data))           # ile ich jest
+data[duplicated(data), ]          # pokaż je
+```
+
+W zbiorze danych wykryto 53 zduplikowane wiersze. Ze względu na charakter danych medycznych, w których pacjenci mogą mieć identyczne cechy kliniczne i demograficzne, zduplikowane obserwacje nie zostały usunięte automatycznie. Uznano, że mogą one reprezentować różne, odrębne przypadki kliniczne o podobnym profilu, dlatego usunięcie tych wierszy mogłoby wpłynąć na wiarygodność analizy.
+
+Jednocześnie przeprowadzono kontrolę pod kątem błędów importu lub innych anomalii, które mogłyby wskazywać na powtarzające się dane wynikające z pomyłek — takich nie stwierdzono.
+
+### 2.2 Braki w danych
+
+Zbadano, czy w zbiorze danych występują braki danych.
+
+```{r}
+# Sprawdzenie braków danych
+colSums(is.na(data))
+```
+
+Po przeprowadzeniu analizy braków danych (missing values) okazało się, że zbiór danych jest kompletny i nie zawiera brakujących wartości we wszystkich zmiennych. Dzięki temu nie było konieczności stosowania metod imputacji ani usuwania obserwacji z powodu braków danych.
+
+### 2.3 Typy danych
+
+```{r}
+# Sprawdzenie typów zmiennych
+str(data)
+```
+
+Po wczytaniu zbioru danych sprawdzono typy wszystkich zmiennych za pomocą funkcji `str()`. Wszystkie zmienne posiadają odpowiednie typy danych: zmienna `Age` jest numeryczna, a zmienne kategoryczne zostały zakodowane jako faktory. Nie było konieczności przeprowadzania dodatkowej konwersji typów danych.
+
+### 2.4 Analiza i opis rozkładu zmiennych
+
+```{r}
+# Podsumowanie zmiennych
+summary(data)
+
+# Unikalne poziomy zmiennych kategorycznych
+sapply(data[, sapply(data, is.factor)], levels)
+```
+
+Przeprowadzono analizę opisową wszystkich zmiennych w zbiorze danych.
+
+-   Zmienna Age jest zmienną liczbową, o zakresie od 15 do 82 lat, ze średnią około 41 lat i medianą 37 lat, co wskazuje na umiarkowanie prawoskośny rozkład.
+
+-   Zmienna Gender reprezentowana jest dwoma kategoriami: F (312 obserwacji) oraz M (71 obserwacji), co pokazuje przewagę pacjentek płci żeńskiej.
+
+-   Zmienne kategoryczne takie jak Hx.Radiothreapy, Adenopathy, Pathology, Focality, Risk, T, N, M, Stage, Response oraz zmienna celu Recurred posiadają odpowiednio zróżnicowane poziomy, co wskazuje na dobrą reprezentację różnych kategorii klinicznych.
+
+-   Dominujące kategorie dla niektórych zmiennych to: Papillary w Pathology (287 obserwacji), No w Hx.Radiothreapy (376), Multi-Focal w Focality (136), Low w Risk (249) oraz stadium I w Stage (333).
+
+-   Zmienna celu Recurred ma dwie kategorie: No (275) i Yes (108), co oznacza, że przypadki nawrotu choroby stanowią około 28% zbioru, co jest ważne do uwzględnienia w dalszym modelowaniu.
+
+### 2.5 Wykrywanie i obsługa wartości odstających
+
+```{r}
+boxplot(data$Age, main = "Wartości odstające dla zmiennej Age")
+Q1 <- quantile(data$Age, 0.25)
+Q3 <- quantile(data$Age, 0.75)
+IQR <- Q3 - Q1
+outliers <- data$Age < (Q1 - 1.5 * IQR) | data$Age > (Q3 + 1.5 * IQR)
+sum(outliers)
+```
+
+W celu identyfikacji potencjalnych wartości odstających, które mogą negatywnie wpływać na wyniki modelowania, wykonano analizę zmiennych liczbowych (w tym przypadku zmiennej `Age`). Przy pomocy wykresu pudełkowego (boxplot) oraz metody IQR zidentyfikowano wartości odstające. W danych nie stwierdzono istotnych odchyleń, które wymagałyby korekty lub usunięcia.
+
+### 2.6 Wstępna selekcja cech
+
+Wstępna selekcja cech obejmuje identyfikację i usunięcie zmiennych, które mogą negatywnie wpływać na jakość modelu. W szczególności dotyczy to:
+
+-   zmiennych o zerowej lub bardzo niskiej wariancji, które nie wnoszą istotnej informacji,
+-   zmiennych silnie skorelowanych (z korelacją Pearsona powyżej 0.9), które mogą wprowadzać redundancję i niestabilność modelu.
+
+Z racji tego, że proces kodowania zmiennych kategorycznych (na zmienne typu dummy) oraz normalizacji jest wykonywany dopiero na etapie przygotowania danych do modelowania, faktyczne usuwanie zmiennych o niskiej wariancji oraz silnie skorelowanych jest realizowane automatycznie w ramach przepisu (`recipe`) przy pomocy kroków `step_zv()` oraz `step_corr()`. Pozwala to na zachowanie oryginalnego zbioru danych do analiz eksploracyjnych i wizualizacji, a jednocześnie gwarantuje, że model jest trenowany na optymalnie dobranym zestawie cech.
+
+#### 2.6.1 Analiza zmienności cech
+
+W pierwszym etapie wstępnej selekcji cech przeprowadzono analizę zmienności zmiennych w zbiorze danych. Zidentyfikowano te cechy, które charakteryzowały się zerową lub bardzo niską wariancją, co oznacza, że w ponad 99% obserwacji przyjmowały tę samą wartość. Takie zmienne są mało informatywne dla modeli predykcyjnych, ponieważ nie wnoszą różnorodności potrzebnej do rozróżnienia klas.
+
+```{r}
+df_dummy <- dummyVars(~ ., data = data %>% select(-Recurred))
+df_numeric <- as.data.frame(predict(df_dummy, data %>% select(-Recurred)))
+
+df_numeric$Recurred <- data$Recurred
+
+# Obliczamy near-zero variance dla zmiennych numerycznych
+nzv <- nearZeroVar(df_numeric, saveMetrics = TRUE)
+
+# Nazwy zmiennych z niską wariancją (nzv = TRUE)
+low_variance_vars <- rownames(nzv)[nzv$nzv]
+print(low_variance_vars)
+df_nzv <- df_numeric[, !nzv$nzv]
+```
+
+Analizę przeprowadzono przy użyciu funkcji nearZeroVar(), która zwróciła listę zmiennych o niskiej wariancji, między innymi: "Adenopathy.Extensive", "Adenopathy.Left", "Adenopathy.Posterior", "T.T3b", "T.T4b", "Stage.III", "Stage.IVA" oraz "Stage.IVB". W związku z tym, dla poprawy jakości modelowania i ograniczenia wymiarowości danych, zdecydowano się na usunięcie tych cech z dalszej analizy.
+
+Usunięcie zmiennych o niskiej wariancji pozwala na uproszczenie modelu oraz zmniejszenie ryzyka przeuczenia, jednocześnie przyspieszając proces uczenia maszynowego i poprawiając interpretowalność wyników.
+
+#### 2.6.2 Sprawdzenie współliniowości
+
+```{r}
+# Usuwamy zmienną docelową
+df_corr <- df_nzv %>% select(-Recurred)
+
+# Liczymy macierz korelacji
+corr_matrix <- cor(df_corr)
+
+# Wizualizacja (opcjonalnie)
+corrplot(corr_matrix, method = "color", tl.cex = 0.6)
+
+# Znajdujemy pary zmiennych o wysokiej korelacji (> 0.9)
+high_corr <- findCorrelation(corr_matrix, cutoff = 0.9)
+
+# Wyświetl, które zmienne są usunięte
+names(df_corr)[high_corr]
+
+# Usuwamy je
+df_corr_selected <- df_corr[, -high_corr]
+
+# Finalny dataframe
+df_selected <- cbind(df_corr_selected, Recurred = df_nzv$Recurred)
+```
+
+W kolejnym etapie wstępnej selekcji cech przeprowadzono analizę macierzy korelacji pomiędzy wszystkimi zmiennymi predykcyjnymi. Dzięki temu zidentyfikowano trzy zmienne o bardzo silnej lub niemal idealnej korelacji z innymi:
+
+-   `Focality.Multi-Focal` (idealna ujemna korelacja z `Focality.Uni-Focal`),
+-   `Gender.M` (idealna ujemna korelacja z `Gender.F`),
+-   `Pathology.Micropapillary` (korelacja ok. 0,96 z `T.T1a`).
+
+Usunięcie tych zmiennych pozwala uniknąć redundancji i problemów z multikolinearnością. Z uwagi na to, że pełne przetwarzanie danych (kodowanie zmiennych kategorycznych, normalizacja, SMOTE) odbywa się dopiero w ramach przepisu (`recipe`), ostateczne usunięcie zidentyfikowanych zmiennych zostanie zrealizowane automatycznie przy pomocy kroku `step_corr()` w etapie przygotowania danych do modelowania.
+
+## 3. Wizualizacja i zależności
+
+### 3.1 Wznowa nowotworu
+
+```{r}
+freq <- table(data$Recurred)
+prop <- prop.table(freq)
+
+df_recurred <- as.data.frame(freq)
+colnames(df_recurred) <- c("Recurred", "Count")
+df_recurred$Percentage <- prop.table(freq) * 100
+
+ggplot(df_recurred, aes(x = Recurred, y = Count, fill = Recurred)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")), vjust = -0.5, size = 5) +
+  scale_fill_manual(values = c("No" = "#66c2a5", "Yes" = "#fc8d62")) +
+  labs(title = "Rozkład nawrotów nowotworu", x = "Wznowa", y = "Liczba przypadków") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16))
+```
+
+**Nawroty choroby (`Recurred`)** występują u około 28% pacjentów, co wskazuje na umiarkowaną częstość nawrotów i podkreśla wagę dokładnej predykcji.
+
+### 3.2 Wiek (Age) a nawrót choroby (Recurred)
+
+```{r}
+# Obliczamy średnie
+stats_df <- data %>%
+  group_by(Recurred) %>%
+  summarise(mean_age = mean(Age),
+            median_age = median(Age))
+
+ggplot(data, aes(x = Recurred, y = Age, fill = Recurred)) +
+  geom_boxplot() +
+
+  # Średnia - punkt i tekst (tekst czarny)
+  stat_summary(fun = mean, geom = "point", shape = 20, size = 3, aes(color = "Średnia")) +
+  stat_summary(fun = mean, geom = "text", aes(label = round(..y.., 1)), 
+               vjust = -0.5, color = "black", size = 4) +
+
+  # Mediana - punkt i tekst (tekst czarny)
+  stat_summary(fun = median, geom = "point", shape = 20, size = 3, aes(color = "Mediana")) +
+  stat_summary(fun = median, geom = "text", aes(label = round(..y.., 1)), 
+               vjust = 1.5, color = "black", size = 4) +
+
+  # Linia pozioma dla mediany
+  geom_segment(data = stats_df, aes(x = as.numeric(Recurred) - 0.4, 
+                                   xend = as.numeric(Recurred) + 0.4,
+                                   y = median_age, yend = median_age,
+                                   color = "Mediana"),
+               size = 1) +
+
+  # Linia przerywana dla średniej
+  geom_segment(data = stats_df, aes(x = as.numeric(Recurred) - 0.4, 
+                                   xend = as.numeric(Recurred) + 0.4,
+                                   y = mean_age, yend = mean_age,
+                                   color = "Średnia"),
+               linetype = "dashed", size = 1) +
+
+  # Skala kolorów i legenda
+  scale_color_manual(name = "Legenda",
+                     values = c(
+                       "Średnia" = "red",
+                       "Mediana" = "black"
+                     )) +
+
+  labs(title = "Wiek pacjentów a wystąpienie nawrotu choroby",
+       fill = "Nawrót choroby") +
+
+  theme(legend.position = "right")
+```
+
+Analiza wykresu wskazuje, że pacjenci, u których wystąpił nawrót choroby (grupa „Yes”), mają wyższy średni wiek (47,1 lat) niż pacjenci bez nawrotu (grupa „No”), gdzie średni wiek wynosi około 38,4 lat. Mediana wieku w grupie z nawrotem choroby to 44,5 lat, natomiast w grupie bez nawrotu – 36 lat.
+
+Zakres wieku jest podobny w obu grupach, jednak w grupie z nawrotem choroby znajdują się pacjenci starsi (maksymalny wiek 82 lata), podczas gdy w grupie bez nawrotu maksymalny wiek wynosi 81 lat. Minimalny wiek w obu grupach jest zbliżony (15–17 lat).
+
+Podsumowując, wyniki sugerują, że wyższy wiek może być czynnikiem powiązanym z większym ryzykiem nawrotu choroby.
+
+### 3.3 Płeć (Gender) vs Recurred
+
+```{r}
+ggplot(data, aes(x = Gender, fill = Recurred)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Procent nawrotów w podziale na płeć", y = "Procent", x = "Płeć") +
+  scale_fill_manual(values = c("No" = "#66c2a5", "Yes" = "#fc8d62"))
+```
+
+Wykres słupkowy pokazuje procentowy udział nawrotów choroby w podziale na płeć i wyraźnie wskazuje na różnice między kobietami a mężczyznami. U kobiet aż około 79% nie miało nawrotu, a tylko 21% doświadczyło nawrotów. Natomiast w grupie mężczyzn sytuacja wygląda inaczej — ponad połowa, bo aż 59%, miała nawroty choroby, a 41% nie. Te wyniki sugerują, że ryzyko nawrotu choroby jest zdecydowanie wyższe u mężczyzn niż u kobiet.
+
+### 3.4 Typ patologii (Pathology) a nawrot (Recurred)
+
+Czy nawroty różnią się w zależności od typu raka?
+
+```{r}
+ggplot(data, aes(x = Pathology, fill = Recurred)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Procent nawrotów wg typu patologii", y = "Procent", x = "Patologia") +
+  scale_fill_manual(values = c("No" = "#66c2a5", "Yes" = "#fc8d62")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+W analizowanej grupie pacjentów w zależności od typu patologii obserwujemy zróżnicowany odsetek nawrotów choroby:
+
+-   **Follicular**: około 42,9% pacjentów doświadczyło nawrotu, podczas gdy 57,1% nie miało nawrotu.
+-   **Hurthel cell**: nawroty wystąpiły u 30,0% pacjentów, natomiast 70,0% pacjentów nie odnotowało nawrotu.
+-   **Micropapillary**: w tej grupie nie zanotowano żadnych nawrotów – wszyscy pacjenci pozostali bez nawrotu.
+-   **Papillary**: 31,4% pacjentów doświadczyło nawrotu, a 68,6% nie miało nawrotu choroby.
+
+Podsumowując, największy odsetek nawrotów występuje w grupie pacjentów z patologią typu *Follicular*, podczas gdy pacjenci z *Micropapillary* nie mieli nawrotów. Pozostałe typy patologii wykazują umiarkowany odsetek nawrotów, oscylujący wokół 30%.
+
+### 3.5. Stadium choroby (Stage) a nawrót choroby
+
+```{r}
+ggplot(data, aes(x = Stage, fill = Recurred)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Procent nawrotów w podziale na stadium choroby (Stage)",
+       y = "Procent", x = "Stadium (Stage)") +
+  scale_fill_manual(values = c("No" = "#66c2a5", "Yes" = "#fc8d62")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Z analizy wykresu przedstawiającego procent nawrotów choroby w zależności od stadium (Stage) wynika wyraźna zależność między zaawansowaniem choroby a ryzykiem jej nawrotu:
+
+-   **Stadium I** cechuje się **najniższym odsetkiem nawrotów (19,5%)**, co sugeruje, że wczesne stadium wiąże się z lepszym rokowaniem.
+-   W **stadium II** odsetek nawrotów gwałtownie wzrasta do **78,1%**, co może wskazywać na znacznie gorsze rokowania już przy niewielkim zaawansowaniu.
+-   W stadiach **III, IVA oraz IVB** **wszystkie przypadki** zakończyły się nawrotem choroby, co podkreśla poważne zagrożenie związane z późnym wykryciem nowotworu.
+
+Im bardziej zaawansowane stadium choroby, tym większe ryzyko nawrotu. Ten wykres dobrze ilustruje istotność wczesnej diagnozy i podjęcia leczenia na jak najwcześniejszym etapie.
+
+### 3.6. Odpowiedzi na leczenie (Response) a nawrót choroby
+
+```{r}
+ggplot(data, aes(x = Response, fill = Recurred)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Procent nawrotów w zależności od odpowiedzi na leczenie (Response)",
+       y = "Procent", x = "Odpowiedź na leczenie") +
+  scale_fill_manual(values = c("No" = "#66c2a5", "Yes" = "#fc8d62")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Dane pokazują wyraźny związek między odpowiedzią na leczenie a ryzykiem nawrotu:
+
+-   **Excellent** – tylko **0,5%** nawrotów, bardzo dobre rokowania.
+-   **Indeterminate** – **11,5%** nawrotów, umiarkowane ryzyko.
+-   **Biochemical Incomplete** – **47,8%** nawrotów, wysokie ryzyko.
+-   **Structural Incomplete** – aż **97,8%** nawrotów, bardzo wysokie ryzyko.
+
+Typ odpowiedzi silnie różnicuje ryzyko nawrotu – od niemal zerowego przy „Excellent” do bardzo wysokiego przy „Structural Incomplete”.
+
+### 3.7. Poziom ryzyka (Risk) a nawrót choroby
+
+```{r}
+ggplot(data, aes(x = Risk, fill = Recurred)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Procent nawrotów wg poziomu ryzyka (Risk)",
+       y = "Procent", x = "Ryzyko") +
+  scale_fill_manual(values = c("No" = "#66c2a5", "Yes" = "#fc8d62")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Występowanie nawrotów różni się znacząco w zależności od poziomu ryzyka przypisanego pacjentom:
+
+-   **Low risk** – tylko **4,8%** pacjentów miało nawrót choroby.
+-   **Intermediate risk** – **62,7%** pacjentów miało nawrót.
+-   **High risk** – **100%** pacjentów doświadczyło nawrotu.
+
+Im wyższa kategoria ryzyka, tym większe prawdopodobieństwo nawrotu – od niskiego przy „Low” do całkowitego przy „High”. To potwierdza trafność klasyfikacji ryzyka w przewidywaniu nawrotów.
+
+### 3.6 Analiza korelacji oraz przygotowanie danych kategorycznych
+
+W celu lepszego zrozumienia zależności między zmiennymi w zbiorze danych wykonano:
+
+#### 3.6.1 Kodowanie zmiennych kategorycznych
+
+Zmienne kategoryczne zakodowano na zmienne binarne metodą one-hot encoding, co umożliwiło dalszą analizę oraz modelowanie.
+
+```{r}
+# Tworzenie macierzy zmiennych binarnych na podstawie danych oryginalnych
+dummies <- dummyVars(~ ., data = data)
+data_encoded <- predict(dummies, newdata = data)  %>%
+                  as.data.frame()
+```
+
+#### 3.6.2 Analiza korelacji zmiennych numerycznych
+
+Na zakodowanym zbiorze danych przeprowadzono analizę korelacji pomiędzy zmiennymi liczbowymi w celu zwizualizowania i identyfikacji istotnych powiązań pomiędzy cechami klinicznymi i demograficznymi pacjentów a wskaźnikami zaawansowania choroby. Analiza korelacji pozwoliła na określenie siły i kierunku zależności pomiędzy zmiennymi, co ułatwia zrozumienie wzajemnych relacji oraz wskazuje na potencjalne czynniki prognostyczne.
+
+```{r}
+# Wybór zmiennych numerycznych
+num_vars <- data_encoded[, sapply(data_encoded, is.numeric)]
+
+# Obliczenie macierzy korelacji
+cor_matrix <- cor(num_vars, use = "complete.obs")
+
+# Wizualizacja macierzy korelacji
+corrplot(cor_matrix, method = "color", tl.cex = 0.6, number.cex = 0.6)
+```
+
+Wyniki analizy wykazały, że zmienne opisujące stopień zaawansowania guza (T), obecność przerzutów w węzłach chłonnych (N), a także stopień zaawansowania choroby (Stage) wykazują istotne korelacje z innymi zmiennymi klinicznymi, takimi jak wieloogniskowość guza, ryzyko nawrotu oraz wiek pacjenta. Przykładowo, wyższe wartości kategorii T korelują z większym ryzykiem nawrotu i bardziej zaawansowanym stadium choroby. Ponadto, obecność obustronnego powiększenia węzłów chłonnych jest silnie powiązana z obecnością przerzutów regionalnych.
+
+Zaobserwowano również zależności pomiędzy płcią pacjenta a wskaźnikami zaawansowania choroby, co może sugerować różnice w przebiegu nowotworu między kobietami a mężczyznami. Analiza korelacji potwierdziła również, że skuteczność leczenia (odpowiedź na terapię) jest odwrotnie skorelowana z cechami zaawansowania choroby, podkreślając znaczenie wczesnej diagnozy i odpowiedniego leczenia.
+
+Podsumowując, przeprowadzona analiza korelacji pozwoliła na identyfikację kluczowych powiązań między zmiennymi, które mogą stanowić podstawę do dalszych analiz prognostycznych.
+
+## 4. Przygotowanie danych do modelowania
+
+W celu zapewnienia poprawnego działania modeli predykcyjnych przeprowadzono trzy kluczowe etapy przygotowania danych.
+
+### 4.1. Podział danych na zbiór treningowy i testowy
+
+Oryginalny zbiór danych podzielono na dwa podzbiory: treningowy (80% danych) i testowy (20%).
+
+```{r}
+set.seed(2024)
+split <- initial_split(data, prop = 0.8)
+Train <- training(split)
+Test <- testing(split)
+
+Train_orig <- Train
+```
+
+### 4.2. Balansowanie danych treningowych metodą SMOTE
+
+```{r}
+Train %>% 
+  group_by(Recurred) %>%
+  summarise(Count = n(), .groups = "drop")
+```
+
+Z uwagi na nierównowagę klas w zmiennej docelowej Recurred, zastosowano technikę oversamplingu SMOTE, która syntetycznie zwiększa liczbę przykładów z klasy mniejszościowej w zbiorze treningowym. Pozwala to na poprawę jakości modeli predykcyjnych.
+
+```{r}
+# Tworzenie przepisu na oryginalnych danych Train
+smote_recipe <- recipe(Recurred ~ ., data = Train) %>%
+  step_normalize(all_numeric_predictors()) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_smote(Recurred) %>% 
+  step_nzv(all_numeric_predictors()) %>% 
+  step_corr(all_numeric_predictors(), threshold = 0.9)  # usuwa silnie skorelowane cechy
+
+prep_smote <- prep(smote_recipe)
+
+# Przetwarzanie danych - na oryginalnych Train i Test
+Train_processed <- bake(prep_smote, new_data = Train)
+Test_processed <- bake(prep_smote, new_data = Test)
+```
+
+### 4.3 Feature selection
+
+```{r}
+# Ustaw seed dla powtarzalności
+set.seed(123)
+
+# Budujemy model Random Forest na zbiorze treningowym
+# (jeśli masz dużo danych, możesz ustawić ntree = 1000 dla stabilniejszych wyników)
+rf_model <- randomForest(Recurred ~ ., 
+                         data = Train_processed, 
+                         importance = TRUE,
+                         ntree = 500)
+
+# Wyświetl ważność zmiennych
+varImpPlot(rf_model, main = "Ważność zmiennych wg Random Forest")
+
+# Pobierz ważność zmiennych jako ramkę danych
+importance_df <- as.data.frame(importance(rf_model))
+importance_df$Variable <- rownames(importance_df)
+
+# Posortuj wg ważności (MeanDecreaseGini jest domyślną miarą ważności)
+importance_df <- importance_df %>%
+  arrange(desc(MeanDecreaseGini))
+
+# Wyświetl tabelkę  — np. 10 najważniejszych zmiennych
+head(importance_df, 10)
+```
+
+Po przeprowadzeniu analizy ważności zmiennych z wykorzystaniem modelu Random Forest, zidentyfikowano cechy o najwyższym wpływie na przewidywanie zmiennej docelowej. Następnie przeanalizowano, czy ograniczenie zbioru cech jedynie do tych o najwyższej ważności wpływa pozytywnie na jakość działania późniejszych modeli predykcyjnych. Po wykonaniu testów stwierdzono, że zastosowanie takiej selekcji nie poprawia wyników modeli, a w niektórych przypadkach prowadzi do ich pogorszenia. W związku z tym podjęto decyzję, że ostateczna selekcja cech będzie ograniczona jedynie do automatycznego usuwania zmiennych o niskiej wariancji oraz zmiennych silnie skorelowanych (na etapie przygotowania danych do modelowania). Pozwoli to na zachowanie pełniejszej informacji w danych przy jednoczesnym ograniczeniu redundancji.
+
+## 5. Eksploracja danych z użyciem technik uczenia maszynowego
+
+W niniejszym rozdziale przedstawiony zostanie proces budowy oraz treningu modeli predykcyjnych z wykorzystaniem wybranych technik uczenia maszynowego. Celem tego etapu jest przygotowanie modeli, które będą mogły zostać następnie ocenione pod względem skuteczności prognozowania wartości zmiennej docelowej.
+
+W ramach analizy zaimplementowano i przeszkolono następujące algorytmy:
+
+-   regresję logistyczną,
+-   las losowy,
+-   maszynę wektorów nośnych (SVM),
+-   algorytm k najbliższych sąsiadów (k-NN),
+-   drzewo decyzyjne,
+-   XGBoost.
+
+Budowa modeli została poprzedzona odpowiednim przygotowaniem danych oraz dostosowaniem parametrów treningu. Szczegółowa ocena jakości wytrenowanych modeli zostanie przedstawiona w kolejnym rozdziale.
+
+### 5.1 Regresja logistyczna
+
+W tym etapie model regresji logistycznej został wytrenowany na przetworzonym zbiorze treningowym oraz dokonano wstępnej oceny jego skuteczności za pomocą miary dokładności na zbiorach treningowym i testowym. Regresja logistyczna jest klasyczną metodą statystyczną stosowaną do problemów klasyfikacji binarnej, która modeluje prawdopodobieństwo przynależności obserwacji do jednej z dwóch klas. Model ten pozwala na analizę zależności pomiędzy zmiennymi niezależnymi a zmienną docelową, dzięki czemu można przewidzieć wystąpienie badanego zjawiska.
+
+```{r}
+log_reg <- logistic_reg() %>%
+            set_engine("glm") %>%
+            set_mode("classification")
+
+log_reg_fit <- fit(log_reg, Recurred ~ ., data = Train_processed) 
+```
+
+```{r}
+#### Predykcja i metryki
+
+# Predykcja - Train
+train_preds_log <- predict(log_reg_fit, Train_processed, type = "prob") %>%
+                    bind_cols(predict(log_reg_fit, Train_processed)) %>%
+                    bind_cols(Train_processed %>% select(Recurred)) 
+
+# Predykcja - Test
+test_preds_log <- predict(log_reg_fit, Test_processed, type = "prob") %>%
+                    bind_cols(predict(log_reg_fit, Test_processed)) %>%
+                    bind_cols(Test_processed %>% select(Recurred)) 
+
+# Metryki
+train_metrics_log <- metrics(train_preds_log, 
+                             truth = Recurred, 
+                             estimate = .pred_class) 
+test_metrics_log <- metrics(test_preds_log, 
+                            truth = Recurred, 
+                            estimate = .pred_class) 
+# Macierze pomyłek
+train_cm_log <- conf_mat(train_preds_log,
+                         truth = Recurred,
+                         estimate = .pred_class)
+test_cm_log <- conf_mat(test_preds_log,
+                        truth = Recurred,
+                        estimate = .pred_class)
+```
+
+```{r}
+#### Dokładność klas
+
+accuracy_per_class <- function(cm){
+  m <- cm$table
+  TN <- m[1,1]
+  FP <- m[1,2]
+  FN <- m[2,1]
+  TP <- m[2,2]
+  acc_0 <- TN / (TN + FP)
+  acc_1 <- TP / (TP + FN)
+  return(c(acc_0, acc_1)) 
+}
+
+results_accuracy_log <- c(
+  train_metrics_log$.estimate[[1]],                      
+  accuracy_per_class(train_cm_log),                      
+  test_metrics_log$.estimate[[1]],                      
+  accuracy_per_class(test_cm_log)
+)
+```
+
+```{r}
+results_dataframe <- data.frame(
+  t(round(results_accuracy_log, 2)))
+
+colnames(results_dataframe) <- c(
+  "Train - Global",
+  "Train - Class 0",
+  "Train - Class 1",
+  "Test - Global",
+  "Test - Class 0",
+  "Test - Class 1"
+)
+
+rownames(results_dataframe) <- "Regresja logistyczna"
+results_dataframe["Regresja logistyczna", ]
+```
+
+W przypadku regresji logistycznej uzyskano bardzo dobre wyniki zarówno na zbiorze treningowym, jak i testowym. Dokładność globalna wyniosła odpowiednio 0.97 na treningu i 0.97 na teście, a dla poszczególnych klas wartości te wyniosły 0.98 dla klasy 0 oraz 0.95 dla klasy 1.
+
+### 5.2 Las losowy
+
+Dla porównania z regresją logistyczną zbudowano model lasu losowego z wykorzystaniem silnika ranger oraz dokonano wstępnej oceny skuteczności modelu za pomocą miary dokładności na zbiorze treningowym i testowym. Las losowy to złożony model zespołowy, który łączy wiele drzew decyzyjnych, co pozwala na uchwycenie nieliniowych zależności w danych. Silnik ranger zapewnia szybkie i efektywne trenowanie modelu, nawet na dużych zbiorach danych. Porównanie obu modeli umożliwia ocenę, czy bardziej zaawansowane metody poprawiają jakość predykcji.
+
+```{r}
+rf_model <- rand_forest(mode = "classification") %>%
+              set_engine("ranger")
+rf_fit <- fit(rf_model, Recurred ~ ., data = Train_processed)
+
+# Predykcja - Train
+train_preds_rf <- predict(rf_fit, Train_processed, type = "prob") %>%
+                    bind_cols(predict(rf_fit, Train_processed)) %>%
+                    bind_cols(Train_processed %>% select(Recurred))
+# Predykcja - Test
+test_preds_rf <- predict(rf_fit, Test_processed, type = "prob") %>%
+                    bind_cols(predict(rf_fit, Test_processed)) %>%
+                    bind_cols(Test_processed %>% select(Recurred))
+
+# Metryki
+train_metrics_log_rf <- metrics(train_preds_rf, 
+                                truth = Recurred, 
+                                estimate = .pred_class) 
+test_metrics_log_rf <- metrics(test_preds_rf, 
+                               truth = Recurred, 
+                               estimate = .pred_class)
+
+# Macierze pomyłek 
+train_cm_rf <- conf_mat(train_preds_rf, 
+                        truth = Recurred, 
+                        estimate = .pred_class) 
+test_cm_rf <- conf_mat(test_preds_rf, 
+                       truth = Recurred, 
+                       estimate = .pred_class)
+```
+
+```{r}
+#### Dokładność klas
+results_accuracy_rf <- c(train_metrics_log_rf$.estimate[[1]],                     
+                         accuracy_per_class(train_cm_rf),                     
+                         test_metrics_log_rf$.estimate[[1]],                     
+                         accuracy_per_class(test_cm_rf)) 
+
+results_dataframe <- rbind(results_dataframe, round(results_accuracy_rf,2))
+rownames(results_dataframe)[2] <- "Las losowy"
+results_dataframe["Las losowy", ]
+```
+
+Model lasu losowego osiągnął wysokie wyniki zarówno na zbiorze treningowym, jak i testowym. Dokładność na zbiorze treningowym wyniosła 0.98, z bardzo dobrymi wynikiem dla obu klas, równym 0.98. Na zbiorze testowym model również spisał się solidnie, uzyskując dokładność ogólną na poziomie 0.95, przy czym dokładność dla klasy 0 oraz dla klasy 1 także wyniosła 0.95.
+
+### 5.3 SVM (Support Vector Machine)
+
+W tym podpunkcie zostanie przedstawione trenowanie modelu SVM (Support Vector Machine), który jest popularną metodą klasyfikacji wykorzystującą hiperpłaszczyzny do maksymalizacji marginesu między klasami. Model ten zostanie dopasowany do przetworzonych danych treningowych, a jego skuteczność wstępnie oceniona na podstawie dokładności na zbiorach treningowym i testowym.
+
+```{r, message=FALSE, warning=FALSE}
+#### Trenowanie i predykcja
+
+svm_model <- svm_poly(mode = "classification") %>%
+               set_engine("kernlab")
+svm_fit <- fit(svm_model, Recurred ~ ., data = Train_processed)
+
+# Predykcje
+train_preds_svm <- predict(svm_fit, Train_processed, type = "prob") %>%
+                     bind_cols(predict(svm_fit, Train_processed)) %>%
+                     bind_cols(Train_processed %>% select(Recurred))
+
+test_preds_svm <- predict(svm_fit, Test_processed, type = "prob") %>%
+                    bind_cols(predict(svm_fit, Test_processed)) %>%
+                    bind_cols(Test_processed %>% select(Recurred))
+
+# Metryki
+train_metrics_svm <- metrics(train_preds_svm, truth = Recurred, estimate = .pred_class)
+test_metrics_svm <- metrics(test_preds_svm, truth = Recurred, estimate = .pred_class)
+
+# Macierze pomyłek
+train_cm_svm <- conf_mat(train_preds_svm, truth = Recurred, estimate = .pred_class)
+test_cm_svm <- conf_mat(test_preds_svm, truth = Recurred, estimate = .pred_class)
+
+#### Dokładność klas
+results_accuracy_svm <- c(train_metrics_svm$.estimate[[1]],
+                          accuracy_per_class(train_cm_svm),
+                          test_metrics_svm$.estimate[[1]],
+                          accuracy_per_class(test_cm_svm))
+
+results_dataframe <- rbind(results_dataframe, round(results_accuracy_svm, 2))
+rownames(results_dataframe)[3] <- "SVM"
+results_dataframe["SVM",]
+```
+
+Model SVM osiągnął wysoką dokładność zarówno na zbiorze treningowym, jak i testowym. Dokładność globalna wyniosła odpowiednio 0.97 dla treningu oraz 0.94 dla testu. Analiza podziału na klasy wskazuje, że model dobrze radzi sobie z rozpoznawaniem obu klas — dla klasy 0 dokładność wyniosła 0.97 (train) i 0.93 (test), natomiast dla klasy 1 odpowiednio 0.95 (train) i 0.94 (test). Wyniki te potwierdzają, że SVM efektywnie klasyfikuje dane, zachowując dobrą generalizację na nowych przykładach.
+
+### 5.4 KNN (k-Nearest Neighbors)
+
+```{r}
+#### Trenowanie i predykcja
+
+knn_model <- nearest_neighbor(mode = "classification", neighbors = 5) %>%
+               set_engine("kknn")
+knn_fit <- fit(knn_model, Recurred ~ ., data = Train_processed)
+
+train_preds_knn <- predict(knn_fit, Train_processed, type = "prob") %>%
+                     bind_cols(predict(knn_fit, Train_processed)) %>%
+                     bind_cols(Train_processed %>% select(Recurred))
+
+test_preds_knn <- predict(knn_fit, Test_processed, type = "prob") %>%
+                    bind_cols(predict(knn_fit, Test_processed)) %>%
+                    bind_cols(Test_processed %>% select(Recurred))
+
+train_metrics_knn <- metrics(train_preds_knn, truth = Recurred, estimate = .pred_class)
+test_metrics_knn <- metrics(test_preds_knn, truth = Recurred, estimate = .pred_class)
+
+train_cm_knn <- conf_mat(train_preds_knn, truth = Recurred, estimate = .pred_class)
+test_cm_knn <- conf_mat(test_preds_knn, truth = Recurred, estimate = .pred_class)
+#### Dokładność klas
+
+results_accuracy_knn <- c(train_metrics_knn$.estimate[[1]],
+                          accuracy_per_class(train_cm_knn),
+                          test_metrics_knn$.estimate[[1]],
+                          accuracy_per_class(test_cm_knn))
+
+results_dataframe <- rbind(results_dataframe, round(results_accuracy_knn, 2))
+rownames(results_dataframe)[4] <- "KNN"
+results_dataframe["KNN",]
+```
+
+Model KNN wykazał się wysoką skutecznością na zbiorze treningowym, z dokładnością globalną na poziomie 0.98. Dokładność dla klasy 0 i klasy 1 na tym zbiorze wyniosła odpowiednio 0.98 oraz 0.97. Na zbiorze testowym dokładność globalna spadła do 0.91, przy czym dokładność dla klasy 0 wyniosła 0.92, a dla klasy 1 – 0.89. Wyniki te wskazują, że model dobrze dopasował się do danych treningowych, ale nieco gorzej radzi sobie z klasyfikacją klasy 1 na nowych danych, co może sugerować potrzebę dalszej optymalizacji lub kalibracji modelu.
+
+### 5.5 Drzewo decyzyjne (Decision Tree)
+
+W podpunkcie dotyczącym drzewa decyzyjnego został zbudowany model klasyfikacyjny, który bazuje na hierarchicznym podziale przestrzeni cech w celu przewidywania klasy docelowej. Drzewo decyzyjne jest intuicyjną i często stosowaną metodą, pozwalającą na łatwą interpretację wyników. Model ten został wytrenowany na przetworzonym zbiorze treningowym, a jego skuteczność wstępnie oceniono za pomocą metryki dokładności.
+
+```{r}
+#### Trenowanie i predykcja
+
+tree_model <- decision_tree(mode = "classification") %>%
+                set_engine("rpart")
+tree_fit <- fit(tree_model, Recurred ~ ., data = Train_processed)
+
+train_preds_tree <- predict(tree_fit, Train_processed, type = "prob") %>%
+                      bind_cols(predict(tree_fit, Train_processed)) %>%
+                      bind_cols(Train_processed %>% select(Recurred))
+
+test_preds_tree <- predict(tree_fit, Test_processed, type = "prob") %>%
+                     bind_cols(predict(tree_fit, Test_processed)) %>%
+                     bind_cols(Test_processed %>% select(Recurred))
+
+train_metrics_tree <- metrics(train_preds_tree, truth = Recurred, estimate = .pred_class)
+test_metrics_tree <- metrics(test_preds_tree, truth = Recurred, estimate = .pred_class)
+
+train_cm_tree <- conf_mat(train_preds_tree, truth = Recurred, estimate = .pred_class)
+test_cm_tree <- conf_mat(test_preds_tree, truth = Recurred, estimate = .pred_class)
+
+#### Dokładność klas
+
+results_accuracy_tree <- c(train_metrics_tree$.estimate[[1]],
+                           accuracy_per_class(train_cm_tree),
+                           test_metrics_tree$.estimate[[1]],
+                           accuracy_per_class(test_cm_tree))
+
+results_dataframe <- rbind(results_dataframe, round(results_accuracy_tree, 2))
+rownames(results_dataframe)[5] <- "Drzewo decyzyjne"
+results_dataframe["Drzewo decyzyjne",]
+```
+
+Wyniki modelu drzewa decyzyjnego wskazują na wysoką skuteczność zarówno na zbiorze treningowym, jak i testowym. Dokładność ogólna na danych treningowych wyniosła 0.95, natomiast na danych testowych 0.91. Model osiągnął dobre wyniki także w rozbiciu na klasy — dla klasy 0 dokładność była odpowiednio 0.96 (train) i 0.92 (test), a dla klasy 1 wyniosła 0.92 (train) i 0.89 (test). Te wyniki sugerują, że drzewo decyzyjne dobrze radzi sobie z klasyfikacją obu klas, zachowując przy tym solidną generalizację na danych testowych.
+
+### 5.6 XGBoost
+
+W tym podpunkcie został zbudowany model klasyfikacyjny wykorzystujący algorytm XGBoost, który jest jedną z najpopularniejszych metod gradient boosting. Model ten łączy wiele słabych klasyfikatorów (zazwyczaj drzew decyzyjnych) w celu uzyskania wysokiej dokładności predykcji. XGBoost charakteryzuje się dużą efektywnością i możliwością radzenia sobie z różnorodnymi zestawami danych, co czyni go często wybieraną metodą w problemach klasyfikacyjnych. Model został wytrenowany na przetworzonym zbiorze treningowym, a jego wstępna skuteczność została oceniona za pomocą metryki dokładności.
+
+```{r}
+#### Trenowanie i predykcja
+
+xgb_model <- boost_tree(mode = "classification", trees = 1000, learn_rate = 0.1, tree_depth = 6) %>%
+                set_engine("xgboost")
+xgb_fit <- fit(xgb_model, Recurred ~ ., data = Train_processed)
+
+train_preds_xgb <- predict(xgb_fit, Train_processed, type = "prob") %>%
+                      bind_cols(predict(xgb_fit, Train_processed)) %>%
+                      bind_cols(Train_processed %>% select(Recurred))
+
+test_preds_xgb <- predict(xgb_fit, Test_processed, type = "prob") %>%
+                     bind_cols(predict(xgb_fit, Test_processed)) %>%
+                     bind_cols(Test_processed %>% select(Recurred))
+
+train_metrics_xgb <- metrics(train_preds_xgb, truth = Recurred, estimate = .pred_class)
+test_metrics_xgb <- metrics(test_preds_xgb, truth = Recurred, estimate = .pred_class)
+
+train_cm_xgb <- conf_mat(train_preds_xgb, truth = Recurred, estimate = .pred_class)
+test_cm_xgb <- conf_mat(test_preds_xgb, truth = Recurred, estimate = .pred_class)
+
+#### Dokładność klas
+
+results_accuracy_xgb <- c(train_metrics_xgb$.estimate[[1]],
+                           accuracy_per_class(train_cm_xgb),
+                           test_metrics_xgb$.estimate[[1]],
+                           accuracy_per_class(test_cm_xgb))
+
+results_dataframe <- rbind(results_dataframe, round(results_accuracy_xgb, 2))
+rownames(results_dataframe)[6] <- "XGBoost"
+results_dataframe["XGBoost",]
+```
+
+Wyniki modelu XGBoost pokazują idealną skuteczność na zbiorze treningowym, gdzie dokładność ogólna oraz dokładność dla obu klas wyniosła 1. Oznacza to, że model poprawnie sklasyfikował wszystkie obserwacje podczas treningu. Na zbiorze testowym model również osiągnął bardzo dobre wyniki — dokładność ogólna oraz dokładność dla obu klas wyniosła 0.95. Takie rezultaty świadczą o doskonałej zdolności modelu do rozróżniania klas oraz dobrej generalizacji na nowe dane, choć perfekcyjne wyniki na treningu mogą wskazywać na potencjalne przeuczenie.
+
+## 6. Ewaluacja modeli uczenia maszynowego oraz ich kalibracja
+
+W niniejszym rozdziale przeprowadzono kompleksową ocenę jakości wytrenowanych modeli predykcyjnych. Zaprezentowano zarówno metryki oceny skuteczności, takie jak dokładność, precyzja, czułość oraz F1-score, jak i macierze pomyłek pozwalające na szczegółową analizę błędów klasyfikacji. Na podstawie tych wyników dokonano wyboru modelu do dalszej kalibracji, której efekty również zostały przedstawione i omówione.
+
+### 6.1 Macierze pomyłek
+
+Aby lepiej zrozumieć działanie poszczególnych modeli, przedstawiono macierze pomyłek dla wszystkich wytrenowanych modeli na zbiorze testowym. Macierz pomyłek pozwala zobaczyć, ile obserwacji zostało poprawnie sklasyfikowanych, a ile zostało błędnie przypisanych do klasy pozytywnej lub negatywnej. Dzięki temu możemy ocenić, gdzie występują główne błędy predykcji i które modele mają większe problemy z rozróżnieniem klas.
+
+```{r, message=FALSE}
+p_log_reg <- autoplot(test_cm_log, type = "heatmap") +
+  scale_fill_gradient(low = "white", high = "#AA4532") +
+  ggtitle("Regresja logistyczna") +
+  theme_minimal()
+
+p_rf <- autoplot(test_cm_rf, type = "heatmap") +
+  scale_fill_gradient(low = "white", high = "#AA4532") +
+  ggtitle("Las losowy") +
+  theme_minimal()
+
+p_svm <- autoplot(test_cm_svm, type = "heatmap") +
+  scale_fill_gradient(low = "white", high = "#AA4532") +
+  ggtitle("SVM") +
+  theme_minimal()
+
+p_knn <- autoplot(test_cm_knn, type = "heatmap") +
+  scale_fill_gradient(low = "white", high = "#AA4532") +
+  ggtitle("k-NN") +
+  theme_minimal()
+
+p_tree <- autoplot(test_cm_tree, type = "heatmap") +
+  scale_fill_gradient(low = "white", high = "#AA4532") +
+  ggtitle("Drzewo decyzyjne") +
+  theme_minimal()
+
+p_xgb <- autoplot(test_cm_xgb, type = "heatmap") +
+  scale_fill_gradient(low = "white", high = "#AA4532") +
+  ggtitle("XGBoost") +
+  theme_minimal()
+
+# Układ wykresów obok siebie (2 wiersze po 3 wykresy)
+(p_log_reg | p_rf | p_svm) / (p_knn | p_tree | p_xgb)
+```
+
+Macierze pomyłek dla poszczególnych modeli obrazują ich zdolność do poprawnej klasyfikacji obserwacji zarówno w klasie „No”, jak i „Yes”. Model regresji logistycznej wyróżnia się najlepszą skutecznością, popełniając minimalną liczbę błędów klasyfikacji. Modele lasu losowego, SVM oraz XGBoost również osiągają dobre wyniki, choć notują nieco więcej fałszywych negatywów i fałszywych pozytywów.
+
+W przypadku modeli k-NN i drzewa decyzyjnego zauważalna jest wyższa liczba błędów, zwłaszcza przy rozpoznawaniu klasy „Yes”. Szczególnie k-NN ma największą liczbę fałszywych negatywów, co może prowadzić do pomijania istotnych przypadków i wskazuje na niższą zdolność do generalizacji.
+
+Podsumowując, pod kątem kalibracji warto skupić się przede wszystkim na modelach k-NN i drzewie decyzyjnym, które wykazują największe braki w skuteczności klasyfikacji i mogą znacząco zyskać na odpowiednim dostrojeniu parametrów lub zastosowaniu metod zapobiegających przeuczeniu. Pozostałe modele, zwłaszcza regresja logistyczna, las losowy i XGBoost, prezentują już stabilne wyniki i kalibracja ich modeli może mieć niższy priorytet.
+
+### 6.2 Metryki
+
+W ewaluacji wykorzystano standardowe miary oceny modeli, takie jak: dokładność (accuracy), precyzja (precision), czułość (recall) oraz miara F1 (F1-score).
+
+```{r}
+# Funkcja do ewaluacji jednego modelu
+evaluate_model_simple <- function(model, data, truth_col_name) {
+  preds_prob <- predict(model, data, type = "prob")
+  preds_class <- predict(model, data)
+  preds <- bind_cols(preds_prob, preds_class) %>%
+           bind_cols(data %>% select(all_of(truth_col_name)))
+  
+  acc <- accuracy_vec(truth = data[[truth_col_name]], estimate = preds$.pred_class)
+  prec <- precision_vec(truth = data[[truth_col_name]], estimate = preds$.pred_class)
+  rec <- recall_vec(truth = data[[truth_col_name]], estimate = preds$.pred_class)
+  f1 <- f_meas_vec(truth = data[[truth_col_name]], estimate = preds$.pred_class)
+  
+  tibble(accuracy = acc, precision = prec, recall = rec, f1 = f1)
+}
+
+# Funkcja do zebrania wyników dla listy modeli i konkretnego zbioru
+collect_results <- function(models, data, truth_col_name, set_name) {
+  purrr::map_df(models, ~evaluate_model_simple(.x, data, truth_col_name), .id = "Model") %>%
+    mutate(Set = set_name)
+}
+
+models_list <- list(
+  log_reg = log_reg_fit,
+  rf = rf_fit,
+  svm = svm_fit,
+  knn = knn_fit,
+  tree = tree_fit,
+  xgb = xgb_fit
+)
+
+# Użycie funkcji dla Train i Test
+train_results <- collect_results(models_list, Train_processed, "Recurred", "Train")
+test_results <- collect_results(models_list, Test_processed, "Recurred", "Test")
+
+# Połączenie wyników
+all_results <- bind_rows(train_results, test_results)
+
+# Mapa ładnych nazw
+model_names_map <- c(
+  log_reg = "Regresja logistyczna",
+  rf = "Las losowy",
+  svm = "Maszyna wektorów nośnych (SVM)",
+  knn = "K najbliższych sąsiadów (k-NN)",
+  tree = "Drzewo decyzyjne",
+  xgb = "XGBoost"
+)
+
+# Podmiana nazw w all_results
+all_results <- all_results %>%
+  mutate(Model = model_names_map[Model])
+
+# Tworzenie tabel z zaokrąglonymi wartościami
+accuracy_df <- all_results %>%
+  select(Model, Set, accuracy) %>%
+  tidyr::pivot_wider(names_from = Set, values_from = accuracy) %>%
+  mutate(across(where(is.numeric), ~round(.x, 2)))
+
+precision_df <- all_results %>%
+  select(Model, Set, precision) %>%
+  tidyr::pivot_wider(names_from = Set, values_from = precision) %>%
+  mutate(across(where(is.numeric), ~round(.x, 2)))
+
+recall_df <- all_results %>%
+  select(Model, Set, recall) %>%
+  tidyr::pivot_wider(names_from = Set, values_from = recall) %>%
+  mutate(across(where(is.numeric), ~round(.x, 2)))
+
+f1_df <- all_results %>%
+  select(Model, Set, f1) %>%
+  tidyr::pivot_wider(names_from = Set, values_from = f1) %>%
+  mutate(across(where(is.numeric), ~round(.x, 2)))
+```
+
+#### 6.2.1 Dokładność (Accuracy)
+
+Zebrano wartości metryki dokładności dla wszystkich rozważanych modeli na zbiorach treningowych oraz testowych. Pozwala to porównać skuteczność poszczególnych modeli zarówno na danych użytych do trenowania, jak i na nowych, niewidzianych danych testowych.
+
+```{r}
+accuracy_df
+```
+
+Analizując wyniki, można zauważyć, że modele takie jak regresja logistyczna, las losowy oraz XGBoost osiągają wysoką dokładność zarówno na zbiorze treningowym, jak i testowym. Regresja logistyczna utrzymuje dokładność na poziomie 97% w obu zbiorach, co świadczy o dobrej zdolności do generalizacji. Las losowy i XGBoost osiągają niemal idealną skuteczność na zbiorze treningowym (odpowiednio 0.98 i 1), a na zbiorze testowym ich dokładność pozostaje wysoka i wynosi 0.95, co wskazuje na stabilność i brak istotnego przeuczenia.
+
+Maszyna wektorów nośnych (SVM) również prezentuje solidne wyniki, z dokładnością na poziomie 0.97 w treningu i 0.94 na zbiorze testowym, co stawia ją nieco poniżej najlepszych modeli, ale nadal w gronie skutecznych rozwiązań.
+
+Modele k najbliższych sąsiadów (k-NN) oraz drzewo decyzyjne osiągają bardzo wysoką dokładność na zbiorze treningowym (0.98 i 0.95), jednak ich wyniki na zbiorze testowym są zauważalnie niższe (po 0.91), co sugeruje ryzyko przeuczenia oraz gorszą zdolność do generalizacji.
+
+Podsumowując, spośród analizowanych modeli regresja logistyczna, las losowy oraz XGBoost oferują najlepszy kompromis między dopasowaniem do danych treningowych a zdolnością do poprawnej klasyfikacji próbek testowych. Ze względu na ich stabilność i wysoką skuteczność są one najbardziej rekomendowane do dalszych zastosowań i analiz.
+
+#### 6.2.2 Precyzja (Precision)
+
+Precyzja to metryka oceniająca, jak dokładnie model potrafi zidentyfikować pozytywne przypadki, minimalizując liczbę fałszywych alarmów. W niniejszym podpunkcie przedstawiono porównanie precyzji różnych modeli na zbiorach treningowym i testowym.
+
+```{r}
+precision_df
+```
+
+Precyzja wszystkich modeli na zbiorze treningowym utrzymuje się na bardzo wysokim poziomie, mieszcząc się w przedziale od 0.96 do 1.00. Najlepszy wynik uzyskał model XGBoost, który osiągnął perfekcyjną precyzję (1.00), co oznacza, że na danych treningowych bardzo skutecznie unikał fałszywych pozytywów.
+
+Na zbiorze testowym precyzja nieco spada, co jest typowe i wskazuje na naturalne różnice między danymi treningowymi a testowymi. Najwyższą precyzję na testach zachowały regresja logistyczna (0.98), las losowy oraz XGBoost (0.95). Model k-NN odnotował największy spadek precyzji z 0.98 do 0.92, co może sugerować jego większą wrażliwość na nowe dane.
+
+Ogólnie można stwierdzić, że wszystkie modele dobrze radzą sobie z minimalizowaniem fałszywych alarmów, przy czym modele XGBoost, regresja logistyczna i las losowy cechują się najlepszą równowagą między skutecznością na zbiorze treningowym i testowym.
+
+#### 6.2.3 Czułość (Recall)
+
+Recall, czyli czułość, mierzy zdolność modelu do poprawnego wykrywania pozytywnych przypadków. W tej sekcji przedstawione zostaną wyniki modeli pod kątem tej metryki, co pozwoli ocenić, jak skutecznie każdy z nich identyfikuje faktyczne zdarzenia pozytywne na zbiorach treningowych oraz testowych.
+
+```{r}
+recall_df
+```
+
+Wyniki recall pokazują, że wszystkie modele radzą sobie bardzo dobrze z wykrywaniem pozytywnych przypadków na obu zbiorach danych. Modele K najbliższych sąsiadów (k-NN) i XGBoost osiągnęły perfekcyjne lub bliskie perfekcji wyniki na zbiorze treningowym (0.99 oraz 1.00), co może świadczyć o dopasowaniu do danych treningowych. Na zbiorze testowym najwyższą czułość na poziomie 0.98 uzyskał las losowy, regresja logistyczna, SVM oraz XGBoost, co świadczy o ich dobrej zdolności generalizacji. Ogólnie wszystkie modele prezentują bardzo solidną czułość, co jest kluczowe w kontekście minimalizacji liczby nie wykrytych przypadków pozytywnych.
+
+#### 6.2.4 F1-score
+
+F1-score to metryka łącząca precyzję i czułość w jedną wartość, która uwzględnia zarówno dokładność pozytywnych predykcji, jak i ich kompletność. Jest szczególnie użyteczna, gdy ważne jest zachowanie równowagi między tymi dwoma aspektami, zwłaszcza w sytuacjach, gdy dane są niezbalansowane lub gdy koszt błędów fałszywie pozytywnych i fałszywie negatywnych jest wysoki. Analiza F1-score pozwala na ocenę ogólnej skuteczności modeli w klasyfikacji, biorąc pod uwagę kompromis między precyzją a recall.
+
+```{r}
+f1_df
+```
+
+Wyniki F1-score wskazują na wysoką skuteczność wszystkich analizowanych modeli zarówno na zbiorze treningowym, jak i testowym. Modele regresji logistycznej, lasu losowego oraz maszyny wektorów nośnych (SVM) osiągnęły zbliżone wartości na poziomie około 0.96–0.98 na zbiorze testowym, co świadczy o ich dobrej równowadze między precyzją a recall.
+
+Drzewo decyzyjne oraz k-NN, mają zauważalnie niższy wynik na testach (0,94), co może sugerować mniejszą zdolność do uogólniania w porównaniu do pozostałych modeli.
+
+XGBoost osiągnął wysoki wynik na treningu (1,00), ale na zbiorze testowym utrzymał wysoką wartość 0,96, co świadczy o bardzo dobrej efektywności i odporności na przeuczenie.
+
+Podsumowując, modele lasu losowego, regresji logistycznej, SVM oraz XGBoost wykazują najlepszą zdolność do generalizacji na danych testowych, co czyni je najbardziej wiarygodnymi do zastosowań praktycznych. Modele k-NN i drzewo decyzyjne mogą wymagać dalszej optymalizacji lub regularyzacji, aby poprawić wyniki na nowych danych.
+
+#### Podsumowanie
+
+Podsumowując wyniki wszystkich metryk — dokładności, precyzji, czułości oraz F1-score — można zauważyć, że modele lasu losowego, regresji logistycznej, maszyny wektorów nośnych (SVM) oraz XGBoost osiągają wysoką i stabilną skuteczność zarówno na zbiorach treningowych, jak i testowych. Modele te dobrze radzą sobie z generalizacją i nie wykazują oznak nadmiernego dopasowania.
+
+Z kolei model k najbliższych sąsiadów (k-NN) oraz drzewo decyzyjne, mimo bardzo dobrych wyników na zbiorze treningowym, mają wyraźnie niższe metryki na zbiorze testowym, co wskazuje na ryzyko przeuczenia. Dlatego właśnie te dwa modele warto poddać kalibracji i dalszej optymalizacji.
+
+W szczególności model k-NN wydaje się głównym kandydatem do kalibracji ze względu na największą różnicę pomiędzy wynikami na treningu i testach. W następnym kroku zajmę się kalibracją tego modelu, aby poprawić jego zdolność do uogólniania i zwiększyć dokładność na danych testowych.
+
+### 6.3 Kalibracja modelu k-NN
+
+Model k-NN został skalibrowany przy użyciu funkcji wag gaussian oraz parametru dist_power = 2, co odpowiada ważeniu odległości w przestrzeni cech w sposób wygładzony. Kalibracja miała na celu poprawę zgodności przewidywanych prawdopodobieństw z rzeczywistymi etykietami klas oraz optymalizację jakości klasyfikacji.
+
+```{r, include=FALSE}
+# Definicja modelu k-NN z parametrami do strojenia
+knn_model <- nearest_neighbor(
+  neighbors = tune(),
+  weight_func = tune(),
+  dist_power = tune()
+) %>%
+  set_engine("kknn") %>%
+  set_mode("classification")
+
+# Workflow łączący model k-NN z recepturą przetwarzania danych (smote_recipe)
+knn_workflow <- workflow() %>%
+  add_model(knn_model) %>%
+  add_recipe(smote_recipe)
+
+# Cross-validation - 5-krotne walidacje krzyżowe ze stratyfikacją
+set.seed(2024)
+cv_folds <- vfold_cv(Train, v = 5, strata = Recurred)
+
+# Tworzenie siatki parametrów do strojenia
+knn_grid <- grid_regular(
+  neighbors(range = c(3, 15)),
+  weight_func(values = c("rectangular", "triangular", "epanechnikov", "gaussian")),
+  dist_power(range = c(1, 2)),
+  levels = c(5, 4, 3)
+)
+
+# Strojenie modelu k-NN na podstawie siatki parametrów
+set.seed(2024)
+knn_tune_results <- tune_grid(
+  knn_workflow,
+  resamples = cv_folds,
+  grid = knn_grid,
+  metrics = metric_set(accuracy, roc_auc),
+  control = control_grid(save_pred = TRUE, verbose = TRUE)
+)
+```
+
+#### Porównanie wyników modelu przed i po kalibracji
+
+```{r}
+accuracy_res <- accuracy(test_preds_knn, truth = Recurred, estimate = .pred_class) %>% 
+  pull(.estimate)  # wyciągamy tylko wartość
+
+roc_auc_res <- roc_auc(test_preds_knn, truth = Recurred, .pred_Yes) %>% 
+  pull(.estimate)
+
+brier_res <- brier_class(test_preds_knn, truth = Recurred, .pred_Yes) %>% 
+  pull(.estimate)
+
+r_b <- data.frame(
+  Metric = c("Accuracy", "ROC AUC", "Brier Score"),
+  Value = c(accuracy_res, roc_auc_res, brier_res)
+)
+```
+
+```{r, warning=FALSE, message=FALSE}
+# Wybór najlepszych parametrów na podstawie dokładności
+best_knn_params <- select_best(knn_tune_results, metric = "accuracy")
+
+print(best_knn_params)
+
+# Finalizacja workflow z najlepszymi parametrami
+best_workflow_knn <- finalize_workflow(knn_workflow, best_knn_params)
+
+# Dopasowanie modelu na podziale trening/test
+knn_model_fit <- last_fit(best_workflow_knn, split = split)
+
+# Zbierz metryki końcowe
+cbind(r_b, collect_metrics(knn_model_fit)) %>% 
+  select(Metric, Value, .estimate) %>% 
+  mutate("Metryka" = Metric, 
+         "Przed_kalibracją" = Value, "Po_kalibracji" = .estimate) %>% 
+  select(-c(Metric, Value, .estimate))
+```
+
+Przed kalibracją model KNN osiągnął dokładność na poziomie 0.909, jednak metryki oceniające jakość prognoz probabilistycznych były bardzo słabe — wartość ROC AUC wynosiła zaledwie 0.0642 a Brier Score był bardzo wysoki (0.875), co świadczy o bardzo złej kalibracji prawdopodobieństw.
+
+Po zastosowaniu kalibracji, dokładność modelu pozostała na tym samym wysokim poziomie (0.909), natomiast jakość przewidywanych prawdopodobieństw znacznie się poprawiła. ROC AUC wzrosło do 0.982, co oznacza, że model bardzo dobrze rozróżnia klasy, a Brier Score spadł do 0.052, wskazując na dobre dopasowanie prognoz probabilistycznych do rzeczywistych wyników.
+
+Kalibracja modelu KNN nie wpłynęła negatywnie na dokładność klasyfikacji, a znacząco poprawiła jakość prognoz probabilistycznych, co jest kluczowe w zastosowaniach wymagających wiarygodnych ocen ryzyka lub prawdopodobieństw. Dzięki temu model jest bardziej użyteczny i wiarygodny w praktyce.
+
+#### Macierz pomyłek dla k-NN
+
+```{r, message=FALSE}
+# Predykcje na zbiorze testowym
+knn_test_predictions <- collect_predictions(knn_model_fit)
+
+# Macierz pomyłek
+test_cm_knn <- conf_mat(knn_test_predictions, truth = Recurred, estimate = .pred_class)
+
+autoplot(test_cm_knn, type = "heatmap") +
+  scale_fill_gradient(low = "white", high = "#B84D42") +
+  ggtitle("Macierz pomyłek – k-NN (Test)") +
+  theme_minimal()
+```
+
+Kalibracja modelu KNN przyczyniła się do zwiększenia zdolności modelu do prawidłowej identyfikacji przypadków pozytywnych, co jest szczególnie ważne w przypadku tego zbioru danych, gdzie konsekwencje pominięcia pozytywnych przypadków są wysokie. Zmniejszenie liczby fałszywych negatywów jest kluczowym wskaźnikiem poprawy.
+
+Jednakże, proces kalibracji doprowadził do nieznacznego wzrostu liczby fałszywych pozytywów. Oznacza to, że model po kalibracji częściej błędnie klasyfikuje przypadki negatywne jako pozytywne.
+
+Podsumowując, kalibracja modelu KNN, mimo nieznacznego wzrostu liczby fałszywych pozytywów, przyniosła istotną poprawę w jego zdolności do prawidłowej identyfikacji przypadków pozytywnych, czyli w rozpoznawaniu nawrotów choroby. Zmniejszenie liczby fałszywych negatywów jest kluczowym wskaźnikiem tej poprawy, co ma szczególne znaczenie dla tego zbioru danych, ponieważ konsekwencje pominięcia nawrotu choroby są wysokie. To sprawia, że skorygowany model jest cenniejszym narzędziem, szczególnie w zastosowaniach medycznych, gdzie minimalizacja ryzyka niezdiagnozowania nawrotu choroby jest absolutnym priorytetem.
+
+## 7. Podsumowanie
+
+Projekt ten koncentrował się na **budowie i ewaluacji modeli uczenia maszynowego do przewidywania nawrotu raka tarczycy**, co jest kluczowe dla optymalizacji leczenia i poprawy wyników pacjentów.
+
+Zbiór danych, choć niewielki, dostarczył bogactwa informacji klinicznych i patologicznych. Kluczowym wyzwaniem była **nierównowaga klas** (mniej przypadków nawrotu), którą skutecznie zaadresowano poprzez zastosowanie techniki **SMOTE**. Analiza danych ujawniła **silne zależności między nawrotem a czynnikami takimi jak wiek, płeć, stadium choroby i odpowiedź na leczenie**, co potwierdziło wartość wykorzystanych zmiennych.
+
+W ramach modelowania zastosowano szereg algorytmów klasyfikacyjnych: **Regresję Logistyczną, Las Losowy, SVM, k-NN, Drzewo Decyzyjne oraz XGBoost**. Początkowe wyniki wskazywały na **wysoką dokładność większości modeli**, jednak dogłębna analiza metryk i macierzy pomyłek ujawniła różnice w ich zdolnościach do generalizacji i wiarygodności predykcji prawdopodobieństw.
+
+### Wnioski końcowe
+
+* **Regresja Logistyczna, Las Losowy i XGBoost** okazały się **najbardziej stabilnymi i efektywnymi modelami**, wykazującymi wysoką dokładność i dobrą zdolność do generalizacji na nowych danych.
+* **Kalibracja modelu k-NN** była kluczowym elementem projektu. Choć nie wpłynęła na jego ogólną dokładność, **znacząco poprawiła wiarygodność prognozowanych prawdopodobieństw** (wzrost AUC ROC z 0.06 do 0.98, spadek Brier Score z 0.88 do 0.05). To osiągnięcie jest niezwykle istotne w kontekście medycznym, gdzie pewność predykcji ma ogromne znaczenie dla podejmowania decyzji klinicznych. Kalibracja przyczyniła się również do **zmniejszenia liczby fałszywych negatywów**, co jest priorytetem w wykrywaniu nawrotów choroby.
+
+Podsumowując, projekt z sukcesem zidentyfikował i zoptymalizował modele predykcyjne, które mogą służyć jako **cenne narzędzia wspierające lekarzy** w identyfikacji pacjentów wysokiego ryzyka i personalizacji opieki, przyczyniając się do lepszych wyników leczenia raka tarczycy.
