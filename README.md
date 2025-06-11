@@ -58,9 +58,9 @@ Najlepsze wyniki osiągnął model **regresji logistycznej**, uzyskując:
 | F1-score    | 98%   |
 
 
-✍️ Autor
+## ✍️ Autor
 Zuzanna Winiarska
 Data: czerwiec 2025
 
-📄 Licencja
-Projekt przeznaczony wyłącznie do celów edukacyjnych. Nie służy do podejmowania decyzji klinicznych. Dane medyczne nie są jawnie udostępnione.
+## 📄 Licencja
+Projekt przeznaczony wyłącznie do celów edukacyjnych. Nie służy do podejmowania decyzji klinicznych.
